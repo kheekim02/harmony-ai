@@ -32,10 +32,46 @@ def detect_pitch(
     
     # Praat returns 0.0 for unvoiced frames. Convert to np.nan
     voiced_flag = f0 > 0.0
-    
-    # Mock probabilities since Praat autocorrelation doesn't output them natively in the same way
-    voiced_prob = np.where(voiced_flag, 1.0, 0.0)
-    
     f0[~voiced_flag] = np.nan
+    
+    # ---------------------------------------------------------
+    # Advanced Pitch Smoothing / Subharmonic Drop Removal
+    # ---------------------------------------------------------
+    # When a singer drops into vocal fry, autocorrelation algorithms often
+    # incorrectly report exactly half the true pitch (an octave drop). 
+    # We use a robust median filter to locate and eliminate these sudden deep "V" shapes.
+    
+    # Run a rolling window median filter, but ONLY apply it if the 
+    # current pitch deviates from the local median by more than a semitone.
+    smoothed_f0 = np.copy(f0)
+    window_size = 11  # ~110ms window to cover short fry bursts
+    half_window = window_size // 2
+    
+    for i in range(len(f0)):
+        if np.isnan(f0[i]):
+            continue
+            
+        # Get the current window (ignoring NaNs)
+        start = max(0, i - half_window)
+        end = min(len(f0), i + half_window + 1)
+        window = f0[start:end]
+        valid_window = window[~np.isnan(window)]
+        
+        if len(valid_window) > 0:
+            local_median = np.median(valid_window)
+            
+            # If the current pitch is outside 1.5 semitones of the local median,
+            # it is almost certainly a tracking error (like an octave jump).
+            ratio = f0[i] / local_median
+            semitones_diff = 12.0 * np.log2(ratio)
+            
+            if abs(semitones_diff) > 1.5:
+                smoothed_f0[i] = local_median
+
+    # Replace original f0 with the smoothed contour
+    f0 = smoothed_f0
+    
+    # Mock probabilities since Praat autocorrelation doesn't output them natively
+    voiced_prob = np.where(voiced_flag, 1.0, 0.0)
 
     return f0, times, voiced_flag, voiced_prob
