@@ -69,58 +69,42 @@ def generate_harmony(
     shifts_hz_multiplier = 2.0 ** (shifts / 12.0)
 
     # ---------------------------------------------------------
-    # Generate Harmony using Librosa Phase Vocoder
+    # Generate Harmony using PSOLA via Parselmouth (Praat)
     # ---------------------------------------------------------
-    # We found that for certain raspy/sibilant voices, Praat's PSOLA 
-    # creates unavoidable metallic/frying artifacts no matter the noise gate.
-    # Librosa's phase vocoder is much more resilient to noisy vocal timbres.
-    
-    # We have an array `shifts` which tells us how many semitones to shift 
-    # at each 10ms frame. Since librosa.effects.pitch_shift operates on audio
-    # arrays, we'll chunk the audio into segments of constant shift.
-    
-    # 1. Smooth the semitone shifts heavily to avoid warbling
-    smoothed_shifts = np.copy(shifts)
-    for i in range(5, n_frames - 5):
-        smoothed_shifts[i] = np.median(shifts[i-5:i+6])
-    shifts = np.round(smoothed_shifts) # Round to nearest semitone to create solid blocks
-    
-    # 2. Segment the audio into blocks of continuous shift
-    harmony = np.zeros_like(audio)
-    
-    current_shift = shifts[0]
-    start_frame = 0
-    
-    # Convert frames to samples (1 frame = 10ms = sr * 0.01 samples)
-    samples_per_frame = int(sr * 0.01)
-    
-    def process_segment(start_f, end_f, shift_amt):
-        start_samp = start_f * samples_per_frame
-        end_samp = end_f * samples_per_frame
-        
-        # Ensure we don't go out of bounds
-        end_samp = min(end_samp, n_samples)
-        if start_samp >= n_samples or start_samp == end_samp:
-            return
-            
-        segment = audio[start_samp:end_samp]
-        
-        if shift_amt == 0.0 or np.max(np.abs(segment)) < 1e-4:
-            # Unvoiced or un-shifted (just copy original)
-            harmony[start_samp:end_samp] = segment
-        else:
-            # Pitch shift this block using Librosa
-            shifted_segment = librosa.effects.pitch_shift(segment, sr=sr, n_steps=shift_amt)
-            harmony[start_samp:start_samp+len(shifted_segment)] = shifted_segment
+    # Parselmouth expects a 2D array (channels, samples) or 1D array
+    sound = parselmouth.Sound(audio, sampling_frequency=sr)
 
-    for i in range(1, n_frames):
-        if shifts[i] != current_shift:
-            process_segment(start_frame, i, current_shift)
-            current_shift = shifts[i]
-            start_frame = i
-            
-    # Process the final segment
-    process_segment(start_frame, n_frames, current_shift)
+    # Create manipulation object using dynamic pitch bounds
+    manipulation = call(sound, "To Manipulation", 0.01, pitch_min, pitch_max)
+
+    # Extract original pitch tier and then remove it to replace with our custom one
+    pitch_tier = call(manipulation, "Extract pitch tier")
+    call([pitch_tier, manipulation], "Replace pitch tier")
+
+    # Create a new Empty PitchTier
+    duration = call(sound, "Get total duration")
+    new_pitch_tier = call("Create PitchTier", "harmony", 0.0, duration)
+
+    # Populate the PitchTier with our shifted continuously varying pitch contour
+    for i, t in enumerate(times):
+        if i < len(f0) and not np.isnan(f0[i]) and f0[i] > 0:
+            new_f0 = f0[i] * shifts_hz_multiplier[i]
+            call(new_pitch_tier, "Add point", t, new_f0)
+
+    # Replace the pitch tier in the manipulation object
+    call([new_pitch_tier, manipulation], "Replace pitch tier")
+
+    # Resynthesize the audio using Pitch-Synchronous Overlap Add (PSOLA)
+    harmony_sound = call(manipulation, "Get resynthesis (overlap-add)")
+
+    # Extract the resulting numpy array
+    harmony = harmony_sound.values[0]
+
+    # Ensure it exactly matches the original length (pad or truncate if necessary)
+    if len(harmony) < n_samples:
+        harmony = np.pad(harmony, (0, n_samples - len(harmony)))
+    elif len(harmony) > n_samples:
+        harmony = harmony[:n_samples]
 
     # Normalize to prevent clipping
     peak = np.max(np.abs(harmony))
