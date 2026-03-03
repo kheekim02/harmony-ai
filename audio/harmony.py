@@ -2,6 +2,8 @@
 
 import librosa
 import numpy as np
+import parselmouth
+from parselmouth.praat import call
 
 from music.theory import compute_harmony_shift, HARMONY_TYPES
 from music.scales import parse_key
@@ -40,7 +42,7 @@ def generate_harmony(
     n_frames = len(f0)
     n_samples = len(audio)
 
-    # Compute per-frame shift amounts
+    # Compute per-frame shift amounts in semitones
     shifts = np.zeros(n_frames)
     for i in range(n_frames):
         if np.isnan(f0[i]) or f0[i] <= 0:
@@ -48,97 +50,59 @@ def generate_harmony(
         else:
             shifts[i] = compute_harmony_shift(f0[i], root, scale_type, interval)
 
-    # Smooth shifts with a rolling median to prevent "warbling" or rapid jumps
-    # (e.g. from singer's vibrato crossing a scale degree boundary)
+    # Smooth shifts with a rolling median to prevent "warbling"
     smoothed = np.copy(shifts)
     for i in range(2, n_frames - 2):
         smoothed[i] = np.median(shifts[i-2:i+3])
     shifts = smoothed
 
-    # Group frames into segments with the same shift (quantized to nearest semitone)
-    segments = []
-    current_shift = round(shifts[0])
-    seg_start = 0
+    # Convert semitone shifts to frequency multipliers
+    shifts_hz_multiplier = 2.0 ** (shifts / 12.0)
 
-    for i in range(1, n_frames):
-        rounded = round(shifts[i])
-        if rounded != current_shift or i == n_frames - 1:
-            seg_end = i if i < n_frames - 1 else n_frames
-            
-            # Ignore very short segments (< 5 frames = ~100ms) to prevent audio "jumping"
-            # unless the note actually stopped (rounded == 0)
-            if (seg_end - seg_start) < 5 and i < n_frames - 1 and rounded != 0 and current_shift != 0:
-                pass  # Keep building current segment
-            else:
-                segments.append((seg_start, seg_end, current_shift))
-                seg_start = i
-                current_shift = rounded
+    # Calculate timestamps for each frame
+    times = librosa.frames_to_time(np.arange(n_frames), sr=sr, hop_length=hop_length)
 
-    if seg_start < n_frames:
-        segments.append((seg_start, n_frames, current_shift))
+    # ---------------------------------------------------------
+    # Generate Harmony using PSOLA via Parselmouth (Praat)
+    # ---------------------------------------------------------
+    # Parselmouth expects a 2D array (channels, samples) or 1D array
+    sound = parselmouth.Sound(audio, sampling_frequency=sr)
 
-    # Build harmony audio by pitch-shifting each segment
-    harmony = np.zeros(n_samples, dtype=np.float32)
-    crossfade_len = min(hop_length * 2, 1024)  # Longer crossfade (~46ms) for smoother transitions
+    # Create manipulation object (time step 0.01, min pitch 75Hz, max pitch 600Hz)
+    manipulation = call(sound, "To Manipulation", 0.01, 75, 600)
 
-    for seg_start_frame, seg_end_frame, shift in segments:
-        if shift == 0:
-            # No shift needed (unvoiced or same note) — use original
-            start_sample = seg_start_frame * hop_length
-            end_sample = min(seg_end_frame * hop_length, n_samples)
-            harmony[start_sample:end_sample] = audio[start_sample:end_sample]
-            continue
+    # Extract original pitch tier and then remove it to replace with our custom one
+    pitch_tier = call(manipulation, "Extract pitch tier")
+    call([pitch_tier, manipulation], "Replace pitch tier")
 
-        # Extract segment with a little padding
-        start_sample = max(0, seg_start_frame * hop_length - crossfade_len)
-        end_sample = min(n_samples, seg_end_frame * hop_length + crossfade_len)
-        segment_audio = audio[start_sample:end_sample]
+    # Create a new Empty PitchTier
+    duration = call(sound, "Get total duration")
+    new_pitch_tier = call("Create PitchTier", "harmony", 0.0, duration)
 
-        if len(segment_audio) < 2048:
-            # Too short to pitch shift meaningfully
-            actual_start = seg_start_frame * hop_length
-            actual_end = min(seg_end_frame * hop_length, n_samples)
-            harmony[actual_start:actual_end] = audio[actual_start:actual_end]
-            continue
+    # Populate the PitchTier with our shifted continuously varying pitch contour
+    for i, t in enumerate(times):
+        if i < len(f0) and not np.isnan(f0[i]) and f0[i] > 0:
+            new_f0 = f0[i] * shifts_hz_multiplier[i]
+            call(new_pitch_tier, "Add point", t, new_f0)
 
-        # Pitch shift this segment
-        shifted = librosa.effects.pitch_shift(
-            y=segment_audio,
-            sr=sr,
-            n_steps=float(shift),
-        )
+    # Replace the pitch tier in the manipulation object
+    call([new_pitch_tier, manipulation], "Replace pitch tier")
 
-        # Place back with crossfade
-        actual_start = seg_start_frame * hop_length
-        actual_end = min(seg_end_frame * hop_length, n_samples)
-        offset = actual_start - start_sample
+    # Resynthesize the audio using Pitch-Synchronous Overlap Add (PSOLA)
+    harmony_sound = call(manipulation, "Get resynthesis (overlap-add)")
 
-        shifted_section = shifted[offset:offset + (actual_end - actual_start)]
-        if len(shifted_section) < (actual_end - actual_start):
-            # Pad if needed
-            pad = np.zeros((actual_end - actual_start) - len(shifted_section))
-            shifted_section = np.concatenate([shifted_section, pad])
+    # Extract the resulting numpy array
+    harmony = harmony_sound.values[0]
 
-        # Apply simple crossfade at boundaries
-        fade_len = min(crossfade_len, len(shifted_section), actual_end - actual_start)
-        if fade_len > 1:
-            fade_in = np.linspace(0, 1, fade_len)
-            fade_out = np.linspace(1, 0, fade_len)
-
-            # Blend start
-            if actual_start > 0:
-                shifted_section[:fade_len] *= fade_in
-                harmony[actual_start:actual_start + fade_len] *= fade_out
-
-            # Blend end
-            if actual_end < n_samples:
-                shifted_section[-fade_len:] *= fade_out
-
-        harmony[actual_start:actual_end] += shifted_section[:actual_end - actual_start]
+    # Ensure it exactly matches the original length (pad or truncate if necessary)
+    if len(harmony) < n_samples:
+        harmony = np.pad(harmony, (0, n_samples - len(harmony)))
+    elif len(harmony) > n_samples:
+        harmony = harmony[:n_samples]
 
     # Normalize to prevent clipping
     peak = np.max(np.abs(harmony))
     if peak > 0:
         harmony = harmony / peak
 
-    return harmony
+    return np.array(harmony, dtype=np.float32)
