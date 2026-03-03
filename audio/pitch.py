@@ -25,13 +25,24 @@ def detect_pitch(
         - voiced_prob: probability of each frame being voiced (mocked for Praat)
     """
     sound = parselmouth.Sound(audio, sampling_frequency=sr)
+    
+    # Extract pitch
     pitch = sound.to_pitch(time_step=0.01, pitch_floor=fmin, pitch_ceiling=fmax)
-
     f0 = pitch.selected_array['frequency']
     times = pitch.xs()
     
-    # Praat returns 0.0 for unvoiced frames. Convert to np.nan
-    voiced_flag = f0 > 0.0
+    # Extract Harmonics-to-Noise Ratio (HNR)
+    # This detects noisy frames (breaths, hard consonants, vocal fry) that shouldn't be pitch-shifted
+    harmonicity = sound.to_harmonicity_cc(time_step=0.01, minimum_pitch=fmin)
+    hnr = harmonicity.values[0]
+    hnr_times = harmonicity.xs()
+    
+    # Interpolate HNR to match the exact timestamps of the pitch contour
+    interp_hnr = np.interp(times, hnr_times, hnr)
+    
+    # Praat returns 0.0 for unvoiced frames. Convert to np.nan. 
+    # Also mask out frames that are too noisy (HNR < 2.0 dB) to prevent PSOLA frying artifacts.
+    voiced_flag = (f0 > 0.0) & (interp_hnr >= 2.0)
     f0[~voiced_flag] = np.nan
     
     # ---------------------------------------------------------
