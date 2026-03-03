@@ -13,9 +13,9 @@ def generate_harmony(
     audio: np.ndarray,
     sr: int,
     f0: np.ndarray,
+    times: np.ndarray,
     key_string: str,
     harmony_type: str = 'Upper 3rd',
-    hop_length: int = 512,
 ) -> np.ndarray:
     """Generate a harmony track from the original audio.
 
@@ -28,10 +28,10 @@ def generate_harmony(
     Args:
         audio: Original mono audio array
         sr: Sample rate
-        f0: Pitch contour from pYIN (Hz, NaN for unvoiced)
+        f0: Pitch contour from Praat (Hz, NaN for unvoiced)
+        times: Array of timestamps for each frame
         key_string: Detected key like 'C Major'
         harmony_type: One of HARMONY_TYPES keys
-        hop_length: Analysis hop length (must match pitch detection)
 
     Returns:
         Harmony audio array (same length as input)
@@ -67,9 +67,6 @@ def generate_harmony(
 
     # Convert semitone shifts to frequency multipliers
     shifts_hz_multiplier = 2.0 ** (shifts / 12.0)
-
-    # Calculate timestamps for each frame
-    times = librosa.frames_to_time(np.arange(n_frames), sr=sr, hop_length=hop_length)
 
     # ---------------------------------------------------------
     # Generate Harmony using PSOLA via Parselmouth (Praat)

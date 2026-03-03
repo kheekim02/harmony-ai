@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self._audio_sr = DEFAULT_SR  # Sample rate
         self._harmony = None         # Generated harmony (numpy)
         self._f0 = None              # Pitch contour
+        self._times = None           # Pitch contour timestamps
         self._detected_key = None    # Auto-detected key string
         self._source_path = None     # Original file path
 
@@ -355,7 +356,7 @@ class MainWindow(QMainWindow):
                 audio, sr = load_audio(path)
 
                 signals.progress.emit(50, "Detecting pitch...")
-                f0, voiced, prob = detect_pitch(audio, sr)
+                f0, times, voiced, prob = detect_pitch(audio, sr)
 
                 signals.progress.emit(80, "Detecting key...")
                 key, confidence = detect_key(f0)
@@ -365,6 +366,7 @@ class MainWindow(QMainWindow):
                     'audio': audio,
                     'sr': sr,
                     'f0': f0,
+                    'times': times,
                     'key': key,
                     'confidence': confidence,
                     'filename': os.path.basename(path),
@@ -383,6 +385,7 @@ class MainWindow(QMainWindow):
         self._audio = result['audio']
         self._audio_sr = result['sr']
         self._f0 = result['f0']
+        self._times = result['times']
         self._detected_key = result['key']
 
         self._waveform.set_original(self._audio)
@@ -433,7 +436,7 @@ class MainWindow(QMainWindow):
             try:
                 signals.progress.emit(30, f"Generating {harmony_type} in {key}...")
                 harmony = generate_harmony(
-                    self._audio, self._audio_sr, self._f0,
+                    self._audio, self._audio_sr, self._f0, self._times,
                     key, harmony_type
                 )
                 signals.progress.emit(100, "Harmony generated!")

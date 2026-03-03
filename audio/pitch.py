@@ -1,16 +1,15 @@
 """Pitch detection using librosa's pYIN algorithm."""
 
-import librosa
 import numpy as np
-
+import parselmouth
 
 def detect_pitch(
     audio: np.ndarray,
     sr: int,
     fmin: float = 65.0,   # C2
     fmax: float = 1047.0,  # C6
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Detect pitch frame-by-frame using pYIN.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Detect pitch frame-by-frame using Praat's autocorrelation algorithm.
 
     Args:
         audio: Mono audio array
@@ -19,24 +18,24 @@ def detect_pitch(
         fmax: Maximum expected frequency
 
     Returns:
-        Tuple of (f0, voiced_flag, voiced_prob)
+        Tuple of (f0, times, voiced_flag, voiced_prob)
         - f0: array of fundamental frequencies (Hz), NaN for unvoiced
+        - times: array of timestamps for each frame
         - voiced_flag: boolean array, True where pitch is detected
-        - voiced_prob: probability of each frame being voiced
+        - voiced_prob: probability of each frame being voiced (mocked for Praat)
     """
-    f0, voiced_flag, voiced_prob = librosa.pyin(
-        audio,
-        fmin=fmin,
-        fmax=fmax,
-        sr=sr,
-        frame_length=2048,
-        hop_length=512,
-    )
+    sound = parselmouth.Sound(audio, sampling_frequency=sr)
+    pitch = sound.to_pitch(time_step=0.01, pitch_floor=fmin, pitch_ceiling=fmax)
 
-    return f0, voiced_flag, voiced_prob
+    f0 = pitch.selected_array['frequency']
+    times = pitch.xs()
+    
+    # Praat returns 0.0 for unvoiced frames. Convert to np.nan
+    voiced_flag = f0 > 0.0
+    
+    # Mock probabilities since Praat autocorrelation doesn't output them natively in the same way
+    voiced_prob = np.where(voiced_flag, 1.0, 0.0)
+    
+    f0[~voiced_flag] = np.nan
 
-
-def get_frame_times(audio: np.ndarray, sr: int, hop_length: int = 512) -> np.ndarray:
-    """Get the time (in seconds) for each analysis frame."""
-    n_frames = 1 + len(audio) // hop_length
-    return librosa.frames_to_time(np.arange(n_frames), sr=sr, hop_length=hop_length)
+    return f0, times, voiced_flag, voiced_prob
