@@ -38,13 +38,13 @@ def detect_pitch(
     # Advanced Pitch Smoothing / Subharmonic Drop Removal
     # ---------------------------------------------------------
     # When a singer drops into vocal fry, autocorrelation algorithms often
-    # incorrectly report exactly half the true pitch (an octave drop). 
+    # incorrectly report exactly half the true pitch (an octave drop) or a fifth.
     # We use a robust median filter to locate and eliminate these sudden deep "V" shapes.
     
-    # Run a rolling window median filter, but ONLY apply it if the 
-    # current pitch deviates from the local median by more than a semitone.
+    # Run a large rolling window median filter, but ONLY apply it if the 
+    # current pitch deviates from the local median by more than a tritone (6 semitones).
     smoothed_f0 = np.copy(f0)
-    window_size = 11  # ~110ms window to cover short fry bursts
+    window_size = 51  # ~510ms window to outvote fry bursts lasting up to 250ms
     half_window = window_size // 2
     
     for i in range(len(f0)):
@@ -60,12 +60,12 @@ def detect_pitch(
         if len(valid_window) > 0:
             local_median = np.median(valid_window)
             
-            # If the current pitch is outside 1.5 semitones of the local median,
-            # it is almost certainly a tracking error (like an octave jump).
+            # If the current pitch is outside 5.5 semitones of the local median,
+            # it is almost certainly a subharmonic tracking error (fry drop).
             ratio = f0[i] / local_median
             semitones_diff = 12.0 * np.log2(ratio)
             
-            if abs(semitones_diff) > 1.5:
+            if abs(semitones_diff) > 5.5:
                 smoothed_f0[i] = local_median
 
     # Replace original f0 with the smoothed contour
