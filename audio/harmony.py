@@ -48,6 +48,13 @@ def generate_harmony(
         else:
             shifts[i] = compute_harmony_shift(f0[i], root, scale_type, interval)
 
+    # Smooth shifts with a rolling median to prevent "warbling" or rapid jumps
+    # (e.g. from singer's vibrato crossing a scale degree boundary)
+    smoothed = np.copy(shifts)
+    for i in range(2, n_frames - 2):
+        smoothed[i] = np.median(shifts[i-2:i+3])
+    shifts = smoothed
+
     # Group frames into segments with the same shift (quantized to nearest semitone)
     segments = []
     current_shift = round(shifts[0])
@@ -57,16 +64,22 @@ def generate_harmony(
         rounded = round(shifts[i])
         if rounded != current_shift or i == n_frames - 1:
             seg_end = i if i < n_frames - 1 else n_frames
-            segments.append((seg_start, seg_end, current_shift))
-            seg_start = i
-            current_shift = rounded
+            
+            # Ignore very short segments (< 5 frames = ~100ms) to prevent audio "jumping"
+            # unless the note actually stopped (rounded == 0)
+            if (seg_end - seg_start) < 5 and i < n_frames - 1 and rounded != 0 and current_shift != 0:
+                pass  # Keep building current segment
+            else:
+                segments.append((seg_start, seg_end, current_shift))
+                seg_start = i
+                current_shift = rounded
 
     if seg_start < n_frames:
         segments.append((seg_start, n_frames, current_shift))
 
     # Build harmony audio by pitch-shifting each segment
     harmony = np.zeros(n_samples, dtype=np.float32)
-    crossfade_len = min(hop_length, 256)  # Crossfade samples
+    crossfade_len = min(hop_length * 2, 1024)  # Longer crossfade (~46ms) for smoother transitions
 
     for seg_start_frame, seg_end_frame, shift in segments:
         if shift == 0:
