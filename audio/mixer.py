@@ -8,6 +8,7 @@ def mix_audio(
     original: np.ndarray,
     harmony: np.ndarray,
     harmony_volume: float = 0.7,
+    original_volume: float = 1.0,
     stereo_width: float = 0.4,
 ) -> np.ndarray:
     """Mix original and harmony audio into a stereo output.
@@ -23,7 +24,7 @@ def mix_audio(
     """
     # Ensure same length
     min_len = min(len(original), len(harmony))
-    orig = original[:min_len]
+    orig = original[:min_len] * original_volume
     harm = harmony[:min_len] * harmony_volume
 
     # Stereo panning
@@ -53,10 +54,11 @@ def export_mix(
     harmony: np.ndarray,
     sr: int = 44100,
     harmony_volume: float = 0.7,
+    original_volume: float = 1.0,
     stereo_width: float = 0.4,
 ):
     """Mix and export to WAV file."""
-    stereo = mix_audio(original, harmony, harmony_volume, stereo_width)
+    stereo = mix_audio(original, harmony, harmony_volume, original_volume, stereo_width)
     save_audio(filepath, stereo, sr)
 
 

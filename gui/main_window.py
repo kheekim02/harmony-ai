@@ -160,9 +160,33 @@ class MainWindow(QMainWindow):
         sliders_row = QHBoxLayout()
         sliders_row.setSpacing(24)
 
+        # Original Volume
+        orig_vol_layout = QVBoxLayout()
+        orig_vol_label = QLabel("ORIGINAL VOL")
+        orig_vol_label.setObjectName("sliderLabel")
+        orig_vol_label.setStyleSheet("color: rgba(255,255,255,0.4); font-size: 10px; font-weight: 700; letter-spacing: 1px;")
+        orig_vol_layout.addWidget(orig_vol_label)
+
+        orig_vol_h = QHBoxLayout()
+        self._orig_vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self._orig_vol_slider.setRange(0, 100)
+        self._orig_vol_slider.setValue(100)
+        self._orig_vol_slider.setFixedWidth(160)
+        orig_vol_h.addWidget(self._orig_vol_slider)
+        self._orig_vol_value = QLabel("100%")
+        self._orig_vol_value.setObjectName("sliderValue")
+        self._orig_vol_value.setStyleSheet("color: rgba(255,255,255,0.5); font-size: 12px; min-width: 35px;")
+        orig_vol_h.addWidget(self._orig_vol_value)
+        orig_vol_layout.addLayout(orig_vol_h)
+        sliders_row.addLayout(orig_vol_layout)
+
+        self._orig_vol_slider.valueChanged.connect(
+            lambda v: self._orig_vol_value.setText(f"{v}%")
+        )
+
         # Harmony Volume
         vol_layout = QVBoxLayout()
-        vol_label = QLabel("HARMONY VOLUME")
+        vol_label = QLabel("HARMONY VOL")
         vol_label.setObjectName("sliderLabel")
         vol_label.setStyleSheet("color: rgba(255,255,255,0.4); font-size: 10px; font-weight: 700; letter-spacing: 1px;")
         vol_layout.addWidget(vol_label)
@@ -171,7 +195,7 @@ class MainWindow(QMainWindow):
         self._vol_slider = QSlider(Qt.Orientation.Horizontal)
         self._vol_slider.setRange(0, 100)
         self._vol_slider.setValue(70)
-        self._vol_slider.setFixedWidth(200)
+        self._vol_slider.setFixedWidth(160)
         vol_h.addWidget(self._vol_slider)
         self._vol_value = QLabel("70%")
         self._vol_value.setObjectName("sliderValue")
@@ -195,7 +219,7 @@ class MainWindow(QMainWindow):
         self._width_slider = QSlider(Qt.Orientation.Horizontal)
         self._width_slider.setRange(0, 100)
         self._width_slider.setValue(40)
-        self._width_slider.setFixedWidth(200)
+        self._width_slider.setFixedWidth(160)
         width_h.addWidget(self._width_slider)
         self._width_value = QLabel("40%")
         self._width_value.setObjectName("sliderValue")
@@ -413,13 +437,14 @@ class MainWindow(QMainWindow):
         if self._audio is None or self._harmony is None:
             return
 
-        vol = self._vol_slider.value() / 100.0
+        orig_vol = self._orig_vol_slider.value() / 100.0
+        harm_vol = self._vol_slider.value() / 100.0
         width = self._width_slider.value() / 100.0
-        stereo = mix_audio(self._audio, self._harmony, vol, width)
+        stereo = mix_audio(self._audio, self._harmony, harm_vol, orig_vol, width)
 
-        # Save to temp file and play
+        # Save to temp file and play using the correct sample rate!
         temp_path = os.path.join(self._temp_dir, "preview.wav")
-        save_audio(temp_path, stereo, 44100)
+        save_audio(temp_path, stereo, self._audio_sr)
 
         self._player.setSource(QUrl.fromLocalFile(temp_path))
         self._player.play()
@@ -445,10 +470,11 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        vol = self._vol_slider.value() / 100.0
+        orig_vol = self._orig_vol_slider.value() / 100.0
+        harm_vol = self._vol_slider.value() / 100.0
         width = self._width_slider.value() / 100.0
-        stereo = mix_audio(self._audio, self._harmony, vol, width)
-        save_audio(path, stereo, 44100)
+        stereo = mix_audio(self._audio, self._harmony, harm_vol, orig_vol, width)
+        save_audio(path, stereo, self._audio_sr)
         self._status.setText(f"💾 Exported to {os.path.basename(path)}")
 
     def closeEvent(self, event):
