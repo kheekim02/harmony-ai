@@ -57,6 +57,9 @@ class MainWindow(QMainWindow):
         self._audio_output.setVolume(0.8)
         self._temp_dir = tempfile.mkdtemp()
 
+        self._player.positionChanged.connect(self._on_position_changed)
+        self._player.durationChanged.connect(self._on_duration_changed)
+
         self._build_ui()
         self.setAcceptDrops(True)
 
@@ -243,6 +246,26 @@ class MainWindow(QMainWindow):
         self._progress.setTextVisible(False)
         self._progress.hide()
         layout.addWidget(self._progress)
+
+        # ── Seek Bar ──
+        seek_layout = QHBoxLayout()
+        seek_layout.setSpacing(12)
+        
+        self._time_label = QLabel("0:00")
+        self._time_label.setStyleSheet("color: rgba(255,255,255,0.5); font-size: 11px;")
+        seek_layout.addWidget(self._time_label)
+        
+        self._seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self._seek_slider.setRange(0, 0)
+        self._seek_slider.setEnabled(False)
+        self._seek_slider.sliderMoved.connect(self._on_seek)
+        seek_layout.addWidget(self._seek_slider)
+        
+        self._duration_label = QLabel("0:00")
+        self._duration_label.setStyleSheet("color: rgba(255,255,255,0.5); font-size: 11px;")
+        seek_layout.addWidget(self._duration_label)
+        
+        layout.addLayout(seek_layout)
 
         # ── Buttons Row ──
         btn_row = QHBoxLayout()
@@ -434,6 +457,10 @@ class MainWindow(QMainWindow):
 
     def _on_play(self):
         """Play the mixed audio."""
+        # If already playing, don't restart, just ensure it's playing
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            return
+
         if self._audio is None or self._harmony is None:
             return
 
@@ -442,10 +469,11 @@ class MainWindow(QMainWindow):
         width = self._width_slider.value() / 100.0
         stereo = mix_audio(self._audio, self._harmony, harm_vol, orig_vol, width)
 
-        # Save to temp file and play using the correct sample rate!
+        # Output file logic
         temp_path = os.path.join(self._temp_dir, "preview.wav")
         save_audio(temp_path, stereo, self._audio_sr)
 
+        # Only set source if it's not the same or if we are loaded new
         self._player.setSource(QUrl.fromLocalFile(temp_path))
         self._player.play()
         self._stop_btn.setEnabled(True)
@@ -454,7 +482,28 @@ class MainWindow(QMainWindow):
     def _on_stop(self):
         self._player.stop()
         self._stop_btn.setEnabled(False)
+        self._seek_slider.setValue(0)
+        self._time_label.setText("0:00")
         self._status.setText("⏹ Stopped")
+
+    def _on_position_changed(self, position):
+        if not self._seek_slider.isSliderDown():
+            self._seek_slider.setValue(position)
+        s = position // 1000
+        m = s // 60
+        s = s % 60
+        self._time_label.setText(f"{m}:{s:02d}")
+
+    def _on_duration_changed(self, duration):
+        self._seek_slider.setRange(0, duration)
+        self._seek_slider.setEnabled(duration > 0)
+        s = duration // 1000
+        m = s // 60
+        s = s % 60
+        self._duration_label.setText(f"{m}:{s:02d}")
+
+    def _on_seek(self, position):
+        self._player.setPosition(position)
 
     # ── Export ──
 

@@ -50,6 +50,15 @@ def generate_harmony(
         else:
             shifts[i] = compute_harmony_shift(f0[i], root, scale_type, interval)
 
+    # Dynamically determine min and max pitch from the detected f0 contour
+    # This prevents octave offsets during PSOLA manipulation
+    valid_f0 = f0[~np.isnan(f0) & (f0 > 0)]
+    if len(valid_f0) > 0:
+        pitch_min = max(50.0, np.min(valid_f0) * 0.8)
+        pitch_max = min(2000.0, np.max(valid_f0) * 1.5)
+    else:
+        pitch_min, pitch_max = 75.0, 600.0
+
     # Smooth shifts with a rolling median to prevent "warbling"
     smoothed = np.copy(shifts)
     for i in range(2, n_frames - 2):
@@ -68,8 +77,8 @@ def generate_harmony(
     # Parselmouth expects a 2D array (channels, samples) or 1D array
     sound = parselmouth.Sound(audio, sampling_frequency=sr)
 
-    # Create manipulation object (time step 0.01, min pitch 75Hz, max pitch 600Hz)
-    manipulation = call(sound, "To Manipulation", 0.01, 75, 600)
+    # Create manipulation object using dynamic pitch bounds
+    manipulation = call(sound, "To Manipulation", 0.01, pitch_min, pitch_max)
 
     # Extract original pitch tier and then remove it to replace with our custom one
     pitch_tier = call(manipulation, "Extract pitch tier")
