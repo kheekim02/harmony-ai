@@ -6,23 +6,26 @@ import parselmouth
 def detect_pitch(
     audio: np.ndarray,
     sr: int,
-    fmin: float = 65.0,   # C2
-    fmax: float = 1047.0,  # C6
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Detect pitch frame-by-frame using Praat's autocorrelation algorithm.
+    fmin: float = 101.0,  # Optimized for vocal fry
+    fmax: float = 1047.0, # C6
+    hnr_threshold: float = 5.0, # dB (Tightened gate after acoustic analysis)
+    median_window: int = 201, # frames (Aggressive subharmonic drop filter)
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Detect pitch using Praat's autocorrelation and apply custom smoothing.
 
     Args:
         audio: Mono audio array
         sr: Sample rate
         fmin: Minimum expected frequency
         fmax: Maximum expected frequency
+        hnr_threshold: Minimum Harmonics-to-Noise Ratio (dB) for a frame to be considered voiced.
+                        Frames below this threshold are marked as unvoiced.
+        median_window: Size of the median filter window (in frames) for subharmonic drop removal.
 
-    Returns:
-        Tuple of (f0, times, voiced_flag, voiced_prob)
-        - f0: array of fundamental frequencies (Hz), NaN for unvoiced
+        tuple: (f0, times, hnr_contour)
+        - f0: array of fundamental frequencies in Hz (NaN for unvoiced)
         - times: array of timestamps for each frame
-        - voiced_flag: boolean array, True where pitch is detected
-        - voiced_prob: probability of each frame being voiced (mocked for Praat)
+        - hnr_contour: Harmonics-to-Noise Ratio (dB) for each frame
     """
     sound = parselmouth.Sound(audio, sampling_frequency=sr)
     
@@ -41,48 +44,44 @@ def detect_pitch(
     interp_hnr = np.interp(times, hnr_times, hnr)
     
     # Praat returns 0.0 for unvoiced frames. Convert to np.nan. 
-    # Also mask out frames that are too noisy (HNR < 2.0 dB) to prevent PSOLA frying artifacts.
-    voiced_flag = (f0 > 0.0) & (interp_hnr >= 2.0)
+    # Also mask out frames that are too noisy based on the dynamic HNR threshold.
+    voiced_flag = (f0 > 0.0) & (interp_hnr >= hnr_threshold)
     f0[~voiced_flag] = np.nan
     
     # ---------------------------------------------------------
-    # Advanced Pitch Smoothing / Subharmonic Drop Removal
+    # Subharmonic Drop Removal (Vocal Fry Filter)
     # ---------------------------------------------------------
-    # When a singer drops into vocal fry, autocorrelation algorithms often
-    # incorrectly report exactly half the true pitch (an octave drop) or a fifth.
-    # We use a robust median filter to locate and eliminate these sudden deep "V" shapes.
+    # Autocorrelation sometimes locks onto the subharmonic (octave drop) during vocal fry.
+    # We use a large rolling median filter to enforce a smooth continuous melody line,
+    # but ONLY apply it if the detected pitch plunges significantly (e.g. > 6 semitones).
     
     # Run a large rolling window median filter, but ONLY apply it if the 
     # current pitch deviates from the local median by more than a tritone (6 semitones).
     smoothed_f0 = np.copy(f0)
-    window_size = 51  # ~510ms window to outvote fry bursts lasting up to 250ms
-    half_window = window_size // 2
+    half_win = median_window // 2
     
     for i in range(len(f0)):
-        if np.isnan(f0[i]):
-            continue
+        if not np.isnan(f0[i]):
+            start_idx = max(0, i - half_win)
+            end_idx = min(len(f0), i + half_win + 1)
             
-        # Get the current window (ignoring NaNs)
-        start = max(0, i - half_window)
-        end = min(len(f0), i + half_window + 1)
-        window = f0[start:end]
-        valid_window = window[~np.isnan(window)]
-        
-        if len(valid_window) > 0:
-            local_median = np.median(valid_window)
+            window = f0[start_idx:end_idx]
+            valid_window = window[~np.isnan(window)]
             
-            # If the current pitch is outside 5.5 semitones of the local median,
-            # it is almost certainly a subharmonic tracking error (fry drop).
-            ratio = f0[i] / local_median
-            semitones_diff = 12.0 * np.log2(ratio)
-            
-            if abs(semitones_diff) > 5.5:
-                smoothed_f0[i] = local_median
+            if len(valid_window) > 3: # Ensure enough valid points for a meaningful median
+                local_median = np.median(valid_window)
+                
+                # If the current pitch is outside 5.5 semitones of the local median,
+                # it is almost certainly a subharmonic tracking error (fry drop).
+                ratio = f0[i] / local_median
+                semitones_diff = 12.0 * np.log2(ratio)
+                
+                if abs(semitones_diff) > 5.5: 
+                    smoothed_f0[i] = local_median
 
     # Replace original f0 with the smoothed contour
     f0 = smoothed_f0
     
-    # Mock probabilities since Praat autocorrelation doesn't output them natively
-    voiced_prob = np.where(voiced_flag, 1.0, 0.0)
-
-    return f0, times, voiced_flag, voiced_prob
+    # Instead of mock probabilities, return the HNR contour so we can use it 
+    # for dynamic EQ gating during harmony generation.
+    return f0, times, interp_hnr

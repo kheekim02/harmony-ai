@@ -356,7 +356,7 @@ class MainWindow(QMainWindow):
                 audio, sr = load_audio(path)
 
                 signals.progress.emit(50, "Detecting pitch...")
-                f0, times, voiced, prob = detect_pitch(audio, sr)
+                f0, times, _ = detect_pitch(audio, sr)
 
                 signals.progress.emit(80, "Detecting key...")
                 key, confidence = detect_key(f0)

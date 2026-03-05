@@ -25,6 +25,8 @@ pyinstaller --windowed \
             --hidden-import "librosa" \
             --hidden-import "soundfile" \
             --hidden-import "numpy" \
+            --hidden-import "parselmouth" \
+            --hidden-import "scipy.signal" \
             --noconfirm \
             main.py
 
