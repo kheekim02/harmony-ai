@@ -3,6 +3,4 @@ librosa>=0.10
 soundfile>=0.12.1
 numpy>=1.26.0
 pyworld>=0.3.4
-torch
-torchaudio
-vocos
+parselmouth>=0.4.3
