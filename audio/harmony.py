@@ -58,7 +58,7 @@ def generate_harmony(
 
     # Create a Manipulation object (Praat's pitch manipulation framework)
     # Parameters: time_step, minimum_pitch, maximum_pitch
-    manipulation = call(snd, "To Manipulation", 0.01, 75, 600)
+    manipulation = call(snd, "To Manipulation", 0.01, 65, 800)
 
     # Extract the pitch tier
     pitch_tier = call(manipulation, "Extract pitch tier")

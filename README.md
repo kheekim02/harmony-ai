@@ -8,7 +8,8 @@ HarmonyAI is a standalone macOS desktop application that takes a vocal audio fil
 - **Dual Waveform GUI:** Beautiful, real-time waveform display of the original and harmony tracks.
 - **Built-in Mixer:** Adjust the harmony volume and stereo pan width on the fly.
 - **Export to WAV:** Save the harmony track alone or the full mixed result.
-- **Local-First:** Completely private. All AI pitch detection (via pYIN) and audio processing runs on-device.
+- **Standalone `.app` Bundle**: Packaged for macOS.
+- **Icon**: Premium, modern interface design.
 
 ## Harmony Types Supported
 - Upper 3rd (two scale degrees up)
@@ -21,14 +22,19 @@ HarmonyAI is a standalone macOS desktop application that takes a vocal audio fil
 1. **Load Audio:** The app loads and normalizes your vocal track.
 2. **Pitch Detection:** Extracts the frame-by-frame fundamental frequency (F0) using the pYIN algorithm.
 3. **Key Detection:** Maps pitches to a chroma histogram and uses the Krumhansl-Kessler algorithm to detect the most likely major or minor key.
-4. **Scale-Aware Shift:** Calculates the proper interval shift per note matching the detected scale, meaning a "3rd" might be +3 semitones or +4 semitones depending on the note's position in the scale.
-5. **Phase Vocoder Shift:** Pitch-shifts audio segments and smoothly crossfades them to create the harmony line.
+4. **Scale-Aware Shift:** Calculates the proper interval shift per note matching the detected scale.
+5. **Praat PSOLA Synthesis:** Uses the Pitch-Synchronous Overlap-and-Add (PSOLA) algorithm via `parselmouth` for high-fidelity, time-domain pitch shifting. This avoids the metallic artifacts of traditional DSP vocoders.
 6. **Mix:** Returns a panned stereo mix.
 
 ## Installation
 
 ### Pre-built `.app` (macOS)
-If you have the pre-built application, simply double-click `HarmonyAI.app` to launch. No dependencies needed.
+1. Download the latest `HarmonyAI.zip` from [Releases](https://github.com/kheekim02/harmony-ai/releases).
+2. Drag `HarmonyAI.app` to your **Applications** folder.
+3. **First-Run Note (Gatekeeper):** Because this application is not signed with an Apple Developer ID, macOS will block it on the first launch. 
+   - **Right-click** `HarmonyAI.app` and select **Open**.
+   - A warning will appear; click **Open** again.
+   - Alternatively, go to **System Settings > Privacy & Security** and scroll down to click **Open Anyway**.
 
 ### Running from Source
 Requires Python 3.12+
