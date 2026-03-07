@@ -1,6 +1,7 @@
 import librosa
 import numpy as np
 import scipy.signal
+import scipy.ndimage
 import pyworld as pw
 import torch
 from vocos import Vocos
@@ -18,6 +19,27 @@ def get_vocos() -> Vocos:
         print("Initializing Neural Vocoder Pipeline...")
         _VOCOS_MODEL = Vocos.from_pretrained("charactr/vocos-mel-24khz")
     return _VOCOS_MODEL
+
+def smooth_voiced_segments(contour: np.ndarray, kernel_size: int = 5) -> np.ndarray:
+    """Applies median filtering ONLY to continuous non-zero (voiced) segments."""
+    smoothed = np.copy(contour)
+    is_voiced = contour > 0.0
+    
+    # Pad to detect edges at the very beginning or end
+    padded = np.pad(is_voiced.astype(int), (1, 1), mode='constant')
+    diff = np.diff(padded)
+    
+    starts = np.where(diff == 1)[0]
+    ends = np.where(diff == -1)[0]
+    
+    for s, e in zip(starts, ends):
+        segment_len = e - s
+        if segment_len >= 3:
+            k = min(kernel_size, segment_len if segment_len % 2 == 1 else segment_len - 1)
+            # Use ndimage to pad edges with 'nearest' rather than dropping to 0
+            smoothed[s:e] = scipy.ndimage.median_filter(smoothed[s:e], size=k, mode='nearest')
+            
+    return smoothed
 
 def generate_harmony(
     audio: np.ndarray,
@@ -65,23 +87,26 @@ def generate_harmony(
     ap = pw.d4c(audio_24k_f64, _f0, t, TARGET_SR)
 
     # ---------------------------------------------------------
-    # Fixed Scalar Pitch Shift (Matching test_vocos_bottleneck.py)
+    # Diatonic Pitch Shift & Targeted F0 Smoothing
     # ---------------------------------------------------------
-    # The previous diatonic snapping logic caused mathematical tears at unvoiced boundaries.
-    # We bypass dynamic arrays and use a pure flat multiplier to ensure absolute 
-    # stability for the neural vocoder.
+    # We apply a nearest-edge median filter ONLY to the voiced segments (f0 > 0.0).
+    # This completely eliminates "trembling" jitter from the raw PyWorld extraction
+    # without zero-padding the boundary edges into silence (which tore the phase).
     
-    fixed_semitone_map = {
-        'Upper 3rd': 4.0,   # Major 3rd
-        'Lower 3rd': -4.0,  # Major 3rd down
-        '5th': 7.0,         # Perfect 5th
-        'Octave Up': 12.0,
-        'Octave Down': -12.0
-    }
-    shift_semitones = fixed_semitone_map.get(harmony_type, 4.0)
+    f0_smooth = smooth_voiced_segments(_f0, kernel_size=7)
+
+    native_shifts = np.zeros_like(f0_smooth)
+    for i in range(len(f0_smooth)):
+        if f0_smooth[i] > 0.0:
+            native_shifts[i] = compute_harmony_shift(f0_smooth[i], root, scale_type, interval)
+
+    smoothed_shifts = smooth_voiced_segments(native_shifts, kernel_size=15)
     
-    # Ensure unvoiced regions (0.0) stay 0.0, and pitched regions scale perfectly
-    f0_shifted = _f0 * (2.0 ** (shift_semitones / 12.0))
+    shift_multipliers = np.ones_like(smoothed_shifts)
+    voiced = f0_smooth > 0.0
+    shift_multipliers[voiced] = 2.0 ** (smoothed_shifts[voiced] / 12.0)
+    
+    f0_shifted = f0_smooth * shift_multipliers
 
     # Calculate metallic audio using PyWorld
     metallic_audio_24k = pw.synthesize(f0_shifted, sp, ap, TARGET_SR).astype(np.float32)
