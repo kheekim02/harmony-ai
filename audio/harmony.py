@@ -2,11 +2,35 @@
 
 import librosa
 import numpy as np
+import scipy.signal
 import pyworld as pw
 
 from music.theory import compute_harmony_shift, HARMONY_TYPES
 from music.scales import parse_key
 
+def fill_all_gaps(f0: np.ndarray) -> np.ndarray:
+    """
+    Interpolates over all gaps of 0.0 in the F0 array, completely bridging
+    unvoiced regions to force a continuous pitch contour. This prevents
+    metallic toggling between voiced/unvoiced states in PyWorld.
+    """
+    f0_filled = np.copy(f0)
+    
+    # Standard numpy trick to linearly interpolate over all zeros
+    f0_filled[f0_filled == 0.0] = np.nan
+    valid_indices = ~np.isnan(f0_filled)
+    
+    if np.any(valid_indices):
+        f0_filled = np.interp(
+            np.arange(len(f0_filled)),
+            np.arange(len(f0_filled))[valid_indices],
+            f0_filled[valid_indices]
+        )
+    else:
+        # Failsafe if the entire track is unvoiced
+        f0_filled.fill(0.0)
+        
+    return f0_filled
 
 def generate_harmony(
     audio: np.ndarray,
@@ -42,20 +66,6 @@ def generate_harmony(
     n_frames = len(f0)
     n_samples = len(audio)
 
-    # Compute per-frame shift amounts in semitones
-    shifts = np.zeros(n_frames)
-    for i in range(n_frames):
-        if np.isnan(f0[i]) or f0[i] <= 0:
-            shifts[i] = 0.0
-        else:
-            shifts[i] = compute_harmony_shift(f0[i], root, scale_type, interval)
-
-    # Smooth shifts with a rolling median to prevent "warbling"
-    smoothed = np.copy(shifts)
-    for i in range(2, n_frames - 2):
-        smoothed[i] = np.median(shifts[i-2:i+3])
-    shifts = np.round(smoothed)
-
     # ---------------------------------------------------------
     # Generate Harmony using PyWorld Vocoder
     # ---------------------------------------------------------
@@ -65,42 +75,45 @@ def generate_harmony(
     # the noise and throat shape completely intact.
     
     # 1. Parameter Extraction
-    # PyWorld's `dio` and `stonemask` algorithms generate a highly accurate f0 contour.
-    # We use the original audio (with percussives) because PyWorld handles AP separation.
-    
-    # Cast explicitly to float64, which PyWorld requires
+    # PyWorld requires float64
     audio_f64 = audio.astype(np.float64)
     
-    # Extract f0
-    _f0, t = pw.dio(audio_f64, sr, f0_floor=65.0, f0_ceil=1047.0)
-    _f0 = pw.stonemask(audio_f64, _f0, t, sr)
+    # Use Harvest algorithm instead of DIO. Harvest is much more robust
+    # at extracting stable F0 contours from noisy or complex audio (vocal fry),
+    # which flattens out high-frequency metallic trembling during vocal shifts.
+    _f0, t = pw.harvest(audio_f64, sr, f0_floor=65.0, f0_ceil=1047.0)
     
-    # Extract Formants (Spectral Envelope)
+    # 2. Extract Spectrogram and Aperiodicity using the RAW _f0
+    # PyWorld must compute AP based on the original un-filled gaps, 
+    # otherwise we get robotic drones during breaths.
     sp = pw.cheaptrick(audio_f64, _f0, t, sr)
-    
-    # Extract Noise (Aperiodicity)
     ap = pw.d4c(audio_f64, _f0, t, sr)
 
-    # 2. Pitch Manipulation
-    # The `shifts` array contains our scale-aware diatonic semitone shifts.
-    # We interpolate our internally detected shifts to match the time resolution 
-    # of the new PyWorld temporal grid.
-    
-    # Interpolate our `shifts` array (which aligns with `times`) to match `t`
-    if len(times) == len(shifts):
-        interpolated_shifts = np.interp(t, times, shifts)
-    else:
-        # Fallback if lengths somehow mismatch
-        interpolated_shifts = np.zeros_like(t)
+    # 3. Pitch Manipulation & Contour Smoothing
+    # Fill ALL gaps to completely eliminate source-filter dropouts
+    _f0_filled = fill_all_gaps(_f0) 
 
-    # Calculate exactly what frequency to shift the contour to
-    f0_shifted = np.copy(_f0)
+    native_shifts = np.zeros_like(_f0_filled)
+    for i in range(len(_f0_filled)):
+        if _f0_filled[i] > 0.0:
+            native_shifts[i] = compute_harmony_shift(_f0_filled[i], root, scale_type, interval)
+        else:
+            native_shifts[i] = 0.0
+
+    # Apply heavy median smoothing to the shift map (kernel_size=15 is approx 75ms).
+    # This prevents the target pitch from wobbling mathematically over breaths 
+    # or micro-fluctuations.
+    smoothed_shifts = scipy.signal.medfilt(native_shifts, kernel_size=15)
+
+    # Apply light median smoothing to the base filled F0 contour itself.
+    f0_smooth = scipy.signal.medfilt(_f0_filled, kernel_size=5)
+
+    # Apply shifted multipliers (now fully continuous across the entire track)
+    f0_shifted = np.copy(f0_smooth)
+    shift_multipliers = 2.0 ** (smoothed_shifts / 12.0)
     
-    # Only shift voiced frames
-    voiced_indices = _f0 > 0.0
-    shift_multipliers = 2.0 ** (interpolated_shifts / 12.0)
-    
-    f0_shifted[voiced_indices] = _f0[voiced_indices] * shift_multipliers[voiced_indices]
+    # Since we filled all gaps, the F0 is continuous. We can multiply everything.
+    f0_shifted = f0_smooth * shift_multipliers
 
     # 3. Resynthesis
     # Feed the newly shifted pitch, along with the untouched Formants and Noise,
