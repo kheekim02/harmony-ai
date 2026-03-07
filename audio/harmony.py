@@ -1,18 +1,28 @@
-"""Harmony generation: scale-aware pitch shifting of vocal audio."""
-
 import librosa
 import numpy as np
 import scipy.signal
 import pyworld as pw
+import torch
+from vocos import Vocos
 
 from music.theory import compute_harmony_shift, HARMONY_TYPES
 from music.scales import parse_key
 
+# Global lazy-load cache so we only download/load the 50MB model once per app session
+_VOCOS_MODEL = None
+
+def get_vocos() -> Vocos:
+    """Lazy-loads the Vocos HuggingFace neural model on first harmony generation."""
+    global _VOCOS_MODEL
+    if _VOCOS_MODEL is None:
+        print("Initializing Neural Vocoder Pipeline...")
+        _VOCOS_MODEL = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+    return _VOCOS_MODEL
+
 def fill_all_gaps(f0: np.ndarray) -> np.ndarray:
     """
     Interpolates over all gaps of 0.0 in the F0 array, completely bridging
-    unvoiced regions to force a continuous pitch contour. This prevents
-    metallic toggling between voiced/unvoiced states in PyWorld.
+    unvoiced regions to force a continuous pitch contour.
     """
     f0_filled = np.copy(f0)
     
@@ -41,99 +51,103 @@ def generate_harmony(
     harmony_type: str = 'Upper 3rd',
     hop_length: int = 512,
 ) -> np.ndarray:
-    """Generate a harmony track from the original audio.
-
-    This is the core algorithm:
-    1. For each pitched frame, compute the scale-aware semitone shift
-    2. Group consecutive frames with similar shifts into segments
-    3. Pitch-shift each segment
-    4. Crossfade between segments
+    """Generate a harmony track from the original audio using a Neural Vocoder.
 
     Args:
         audio: Original mono audio array
-        sr: Sample rate
+        sr: Original Sample rate
         f0: Pitch contour from Praat (Hz, NaN for unvoiced)
         times: Array of timestamps for each frame
         key_string: Detected key like 'C Major'
         harmony_type: One of HARMONY_TYPES keys
 
     Returns:
-        Harmony audio array (same length as input)
+        Harmony audio array (same length as input, at original sample rate)
     """
     root, scale_type = parse_key(key_string)
     interval = HARMONY_TYPES.get(harmony_type, 2)
-
-    n_frames = len(f0)
-    n_samples = len(audio)
+    n_samples_orig = len(audio)
 
     # ---------------------------------------------------------
-    # Generate Harmony using PyWorld Vocoder
+    # 1. Neural Vocoder Sample Rate Formatting (24000 Hz constraint)
     # ---------------------------------------------------------
-    # PyWorld is a high-quality vocoder that natively separates Pitch (F0),
-    # Formants (SP), and Aperiodicity/Noise (AP). It prevents metallic chipmunk
-    # artifacts by allowing us to individually manipulate the pitch while keeping
-    # the noise and throat shape completely intact.
-    
-    # 1. Parameter Extraction
-    # PyWorld requires float64
-    audio_f64 = audio.astype(np.float64)
-    
-    # Use Harvest algorithm instead of DIO. Harvest is much more robust
-    # at extracting stable F0 contours from noisy or complex audio (vocal fry),
-    # which flattens out high-frequency metallic trembling during vocal shifts.
-    _f0, t = pw.harvest(audio_f64, sr, f0_floor=65.0, f0_ceil=1047.0)
-    
-    # 2. Extract Spectrogram and Aperiodicity using the RAW _f0
-    # PyWorld must compute AP based on the original un-filled gaps, 
-    # otherwise we get robotic drones during breaths.
-    sp = pw.cheaptrick(audio_f64, _f0, t, sr)
-    ap = pw.d4c(audio_f64, _f0, t, sr)
+    TARGET_SR = 24000
+    if sr != TARGET_SR:
+        audio_24k = librosa.resample(audio, orig_sr=sr, target_sr=TARGET_SR)
+    else:
+        audio_24k = np.copy(audio)
+        
+    audio_24k_f64 = audio_24k.astype(np.float64)
 
-    # 3. Pitch Manipulation & Contour Smoothing
-    # Fill ALL gaps to completely eliminate source-filter dropouts
+    # ---------------------------------------------------------
+    # 2. PyWorld Feature Extraction (Phase 1)
+    # ---------------------------------------------------------
+    # We still use PyWorld to accurately track F0 and model formants
+    _f0, t = pw.harvest(audio_24k_f64, TARGET_SR, f0_floor=65.0, f0_ceil=1047.0)
+    sp = pw.cheaptrick(audio_24k_f64, _f0, t, TARGET_SR)
+    ap = pw.d4c(audio_24k_f64, _f0, t, TARGET_SR)
+
+    # Fill unvoiced gaps for continuous shifting
     _f0_filled = fill_all_gaps(_f0) 
 
     native_shifts = np.zeros_like(_f0_filled)
     for i in range(len(_f0_filled)):
         if _f0_filled[i] > 0.0:
             native_shifts[i] = compute_harmony_shift(_f0_filled[i], root, scale_type, interval)
-        else:
-            native_shifts[i] = 0.0
 
-    # Apply heavy median smoothing to the shift map (kernel_size=15 is approx 75ms).
-    # This prevents the target pitch from wobbling mathematically over breaths 
-    # or micro-fluctuations.
     smoothed_shifts = scipy.signal.medfilt(native_shifts, kernel_size=15)
-
-    # Apply light median smoothing to the base filled F0 contour itself.
     f0_smooth = scipy.signal.medfilt(_f0_filled, kernel_size=5)
 
-    # Apply shifted multipliers (now fully continuous across the entire track)
-    f0_shifted = np.copy(f0_smooth)
+    # Calculate actual shifted pitch contour
     shift_multipliers = 2.0 ** (smoothed_shifts / 12.0)
-    
-    # Since we filled all gaps, the F0 is continuous. We can multiply everything.
     f0_shifted = f0_smooth * shift_multipliers
 
-    # 3. Resynthesis
-    # Feed the newly shifted pitch, along with the untouched Formants and Noise,
-    # back into PyWorld to generate the final high-fidelity audio.
-    harmony = pw.synthesize(f0_shifted, sp, ap, sr)
+    # Calculate metallic audio using PyWorld
+    metallic_audio_24k = pw.synthesize(f0_shifted, sp, ap, TARGET_SR).astype(np.float32)
     
-    # Convert back to float32
-    harmony = harmony.astype(np.float32)
+    peak = np.max(np.abs(metallic_audio_24k))
+    if peak > 0.99:
+        metallic_audio_24k = metallic_audio_24k / peak
+        
+    # ---------------------------------------------------------
+    # 3. Neural Hallucination Phase Bottleneck (The Vocos Overhaul)
+    # ---------------------------------------------------------
+    # To fix PyWorld's mathematical tearing, we completely strip the phase
+    # data by funneling the PyWorld audio into a Mel-Spectrogram, then
+    # use Neural Vocoder AI to hallucinate a flawless human phase back in.
+    
+    vocoder = get_vocos()
+    
+    # 1. Convert to torch tensor with shape [B, C, T] -> [1, length]
+    audio_tensor = torch.from_numpy(metallic_audio_24k).unsqueeze(0)
+    
+    # 2. Extract Mel-Spectrogram features (destroys the metallic PyWorld phase)
+    with torch.no_grad():
+        mel_features = vocoder.feature_extractor(audio_tensor)
+        
+        # 3. Decode features via Deep Learning into flawless acoustic waveform
+        neural_audio_tensor = vocoder.decode(mel_features)
+        
+    harmony_24k = neural_audio_tensor.squeeze().cpu().numpy()
 
-    # Ensure it exactly matches the original length (pad or truncate if necessary)
-    if len(harmony) < n_samples:
-        harmony = np.pad(harmony, (0, n_samples - len(harmony)))
-    elif len(harmony) > n_samples:
-        harmony = harmony[:n_samples]
+    # ---------------------------------------------------------
+    # 4. Final Output Formatting
+    # ---------------------------------------------------------
+    # Resample the AI generation back to exactly match the DAW/WAV original sr
+    if sr != TARGET_SR:
+        harmony_final = librosa.resample(harmony_24k, orig_sr=TARGET_SR, target_sr=sr)
+    else:
+        harmony_final = harmony_24k
 
-    # Normalize to prevent clipping
-    peak = np.max(np.abs(harmony))
+    # Precise sample-clipping constraint
+    if len(harmony_final) < n_samples_orig:
+        harmony_final = np.pad(harmony_final, (0, n_samples_orig - len(harmony_final)))
+    elif len(harmony_final) > n_samples_orig:
+        harmony_final = harmony_final[:n_samples_orig]
+
+    # Normalize output
+    peak = np.max(np.abs(harmony_final))
     if peak > 0:
-        harmony = harmony / peak
+        harmony_final = harmony_final / peak
 
-    return harmony
-
-    return np.array(harmony, dtype=np.float32)
+    return harmony_final.astype(np.float32)
