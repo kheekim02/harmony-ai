@@ -2,8 +2,7 @@
 
 import librosa
 import numpy as np
-import parselmouth
-from parselmouth.praat import call
+import pyworld as pw
 
 from music.theory import compute_harmony_shift, HARMONY_TYPES
 from music.scales import parse_key
@@ -58,68 +57,58 @@ def generate_harmony(
     shifts = np.round(smoothed)
 
     # ---------------------------------------------------------
-    # Harmonic-Percussive Source Separation (HPSS)
+    # Generate Harmony using PyWorld Vocoder
     # ---------------------------------------------------------
-    # PSOLA pitch shifting creates extreme metallic tearing when fed 
-    # unvoiced signals or vocal fry. By pre-processing the audio with HPSS,
-    # we mathematically extract the pure pitched vocal tone (Harmonic) from 
-    # the breaths, sibilance, and fry noise (Percussive).
-    # We use a margin of 2.0 to aggressively isolate the harmonic elements.
+    # PyWorld is a high-quality vocoder that natively separates Pitch (F0),
+    # Formants (SP), and Aperiodicity/Noise (AP). It prevents metallic chipmunk
+    # artifacts by allowing us to individually manipulate the pitch while keeping
+    # the noise and throat shape completely intact.
     
-    harmonic, percussive = librosa.effects.hpss(audio, margin=2.0)
+    # 1. Parameter Extraction
+    # PyWorld's `dio` and `stonemask` algorithms generate a highly accurate f0 contour.
+    # We use the original audio (with percussives) because PyWorld handles AP separation.
+    
+    # Cast explicitly to float64, which PyWorld requires
+    audio_f64 = audio.astype(np.float64)
+    
+    # Extract f0
+    _f0, t = pw.dio(audio_f64, sr, f0_floor=65.0, f0_ceil=1047.0)
+    _f0 = pw.stonemask(audio_f64, _f0, t, sr)
+    
+    # Extract Formants (Spectral Envelope)
+    sp = pw.cheaptrick(audio_f64, _f0, t, sr)
+    
+    # Extract Noise (Aperiodicity)
+    ap = pw.d4c(audio_f64, _f0, t, sr)
 
-    # ---------------------------------------------------------
-    # Generate Harmony using Praat LPC Resynthesis
-    # ---------------------------------------------------------
-    # By running LPC Resynthesis strictly on the clean Harmonic tone,
-    # we mathematically preserve formants on high notes (no metallic chipmunk tearing)
-    # while the HPSS pre-processor protects the transients from sounding "shaky".
+    # 2. Pitch Manipulation
+    # The `shifts` array contains our scale-aware diatonic semitone shifts.
+    # We interpolate our internally detected shifts to match the time resolution 
+    # of the new PyWorld temporal grid.
     
-    # Dynamically determine min and max pitch from the detected f0 contour
-    valid_f0 = f0[~np.isnan(f0) & (f0 > 0)]
-    if len(valid_f0) > 0:
-        pitch_min = max(50.0, np.min(valid_f0) * 0.8)
-        pitch_max = min(2000.0, np.max(valid_f0) * 1.5)
+    # Interpolate our `shifts` array (which aligns with `times`) to match `t`
+    if len(times) == len(shifts):
+        interpolated_shifts = np.interp(t, times, shifts)
     else:
-        pitch_min, pitch_max = 75.0, 600.0
+        # Fallback if lengths somehow mismatch
+        interpolated_shifts = np.zeros_like(t)
 
-    # Convert semitone shifts to frequency multipliers
-    shifts_hz_multiplier = 2.0 ** (shifts / 12.0)
-
-    # We strictly feed ONLY the clean harmonic audio track to the Praat engine.
-    sound = parselmouth.Sound(harmonic, sampling_frequency=sr)
-
-    # Create manipulation object using dynamic pitch bounds
-    manipulation = call(sound, "To Manipulation", 0.01, pitch_min, pitch_max)
-
-    # Extract original pitch tier and then remove it to replace with our custom one
-    pitch_tier = call(manipulation, "Extract pitch tier")
-    call([pitch_tier, manipulation], "Replace pitch tier")
-
-    # Create a new Empty PitchTier
-    duration = call(sound, "Get total duration")
-    new_pitch_tier = call("Create PitchTier", "harmony", 0.0, duration)
-
-    # Populate the PitchTier with our shifted continuously varying pitch contour
-    for i, t in enumerate(times):
-        if i < len(f0) and not np.isnan(f0[i]) and f0[i] > 0:
-            new_f0 = f0[i] * shifts_hz_multiplier[i]
-            call(new_pitch_tier, "Add point", t, new_f0)
-
-    # Replace the pitch tier in the manipulation object
-    call([new_pitch_tier, manipulation], "Replace pitch tier")
-
-    # Resynthesize the audio using Linear Predictive Coding (LPC)
-    # This prevents the formant distortion ("chipmunk effect") on high notes
-    harmony_sound = call(manipulation, "Get resynthesis (LPC)")
-
-    # Extract the resulting numpy array and importantly, resample it back
-    # to the original sample rate (Praat LPC inherently downsamples to 10kHz)
-    harmony = harmony_sound.values[0]
-    out_sr = harmony_sound.sampling_frequency
+    # Calculate exactly what frequency to shift the contour to
+    f0_shifted = np.copy(_f0)
     
-    if out_sr != sr:
-        harmony = librosa.resample(harmony, orig_sr=out_sr, target_sr=sr)
+    # Only shift voiced frames
+    voiced_indices = _f0 > 0.0
+    shift_multipliers = 2.0 ** (interpolated_shifts / 12.0)
+    
+    f0_shifted[voiced_indices] = _f0[voiced_indices] * shift_multipliers[voiced_indices]
+
+    # 3. Resynthesis
+    # Feed the newly shifted pitch, along with the untouched Formants and Noise,
+    # back into PyWorld to generate the final high-fidelity audio.
+    harmony = pw.synthesize(f0_shifted, sp, ap, sr)
+    
+    # Convert back to float32
+    harmony = harmony.astype(np.float32)
 
     # Ensure it exactly matches the original length (pad or truncate if necessary)
     if len(harmony) < n_samples:
@@ -127,28 +116,11 @@ def generate_harmony(
     elif len(harmony) > n_samples:
         harmony = harmony[:n_samples]
 
-    # Normalize to prevent clipping (before remixing percussive)
-    peak = np.max(np.abs(harmony))
-    if peak > 0:
-        harmony = harmony / peak
-
-    # ---------------------------------------------------------
-    # Reconstruct Final Audio
-    # ---------------------------------------------------------
-    # We mix the cleanly pitch-shifted harmonic track back mathematically 
-    # with the untouched, unshifted percussive noise.
-    
-    # Ensure percussive track matches the fixed harmony length
-    if len(percussive) < len(harmony):
-        percussive = np.pad(percussive, (0, len(harmony) - len(percussive)))
-    elif len(percussive) > len(harmony):
-        percussive = percussive[:len(harmony)]
-
-    harmony = harmony + percussive
-
     # Normalize to prevent clipping
     peak = np.max(np.abs(harmony))
     if peak > 0:
         harmony = harmony / peak
+
+    return harmony
 
     return np.array(harmony, dtype=np.float32)
