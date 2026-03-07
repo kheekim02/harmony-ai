@@ -64,17 +64,24 @@ def generate_harmony(
     sp = pw.cheaptrick(audio_24k_f64, _f0, t, TARGET_SR)
     ap = pw.d4c(audio_24k_f64, _f0, t, TARGET_SR)
 
-    native_shifts = np.zeros_like(_f0)
-    for i in range(len(_f0)):
-        if _f0[i] > 0.0:
-            native_shifts[i] = compute_harmony_shift(_f0[i], root, scale_type, interval)
-
-    smoothed_shifts = scipy.signal.medfilt(native_shifts, kernel_size=15)
-    f0_smooth = scipy.signal.medfilt(_f0, kernel_size=5)
-
-    # Calculate actual shifted pitch contour
-    shift_multipliers = 2.0 ** (smoothed_shifts / 12.0)
-    f0_shifted = f0_smooth * shift_multipliers
+    # ---------------------------------------------------------
+    # Fixed Scalar Pitch Shift (Matching test_vocos_bottleneck.py)
+    # ---------------------------------------------------------
+    # The previous diatonic snapping logic caused mathematical tears at unvoiced boundaries.
+    # We bypass dynamic arrays and use a pure flat multiplier to ensure absolute 
+    # stability for the neural vocoder.
+    
+    fixed_semitone_map = {
+        'Upper 3rd': 4.0,   # Major 3rd
+        'Lower 3rd': -4.0,  # Major 3rd down
+        '5th': 7.0,         # Perfect 5th
+        'Octave Up': 12.0,
+        'Octave Down': -12.0
+    }
+    shift_semitones = fixed_semitone_map.get(harmony_type, 4.0)
+    
+    # Ensure unvoiced regions (0.0) stay 0.0, and pitched regions scale perfectly
+    f0_shifted = _f0 * (2.0 ** (shift_semitones / 12.0))
 
     # Calculate metallic audio using PyWorld
     metallic_audio_24k = pw.synthesize(f0_shifted, sp, ap, TARGET_SR).astype(np.float32)
