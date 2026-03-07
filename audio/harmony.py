@@ -57,31 +57,53 @@ def generate_harmony(
     audio_24k_f64 = audio_24k.astype(np.float64)
 
     # ---------------------------------------------------------
-    # 2. PyWorld Feature Extraction (Phase 1)
+    # 2. PyWorld Feature Extraction with Synchronized Smoothing
     # ---------------------------------------------------------
-    # We still use PyWorld to accurately track F0 and model formants
-    _f0, t = pw.harvest(audio_24k_f64, TARGET_SR, f0_floor=65.0, f0_ceil=1047.0)
-    sp = pw.cheaptrick(audio_24k_f64, _f0, t, TARGET_SR)
-    ap = pw.d4c(audio_24k_f64, _f0, t, TARGET_SR)
+    # CRITICAL INSIGHT: Previous attempts to smooth F0 failed because
+    # SP and AP were extracted from the RAW F0 but synthesis used a
+    # MODIFIED F0, causing parameter desynchronization → metallic tearing.
+    #
+    # The fix: smooth F0 FIRST, then extract SP/AP from the SMOOTHED F0.
+    # This keeps all three PyWorld parameters perfectly synchronized.
+    
+    # Step 1: Extract raw F0 with harvest
+    _f0_raw, t = pw.harvest(audio_24k_f64, TARGET_SR, f0_floor=65.0, f0_ceil=1047.0)
+    
+    # Step 2: Smooth the raw F0 using median filter on voiced segments only
+    # We use scipy.ndimage with 'nearest' mode to avoid zero-padding at edges
+    from scipy.ndimage import median_filter as ndimage_medfilt
+    _f0_smooth = np.copy(_f0_raw)
+    voiced_mask = _f0_raw > 0.0
+    if np.any(voiced_mask):
+        # Find contiguous voiced segments
+        padded = np.pad(voiced_mask.astype(int), (1, 1), mode='constant')
+        diff = np.diff(padded)
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        for s, e in zip(starts, ends):
+            seg_len = e - s
+            if seg_len >= 3:
+                k = min(7, seg_len if seg_len % 2 == 1 else seg_len - 1)
+                _f0_smooth[s:e] = ndimage_medfilt(_f0_smooth[s:e], size=k, mode='nearest')
+    
+    # Step 3: Extract SP and AP using the SMOOTHED F0 (synchronized!)
+    sp = pw.cheaptrick(audio_24k_f64, _f0_smooth, t, TARGET_SR)
+    ap = pw.d4c(audio_24k_f64, _f0_smooth, t, TARGET_SR)
 
     # ---------------------------------------------------------
     # Fixed Scalar Pitch Shift (Matching test_vocos_bottleneck.py)
     # ---------------------------------------------------------
-    # The previous diatonic snapping logic caused mathematical tears at unvoiced boundaries.
-    # We bypass dynamic arrays and use a pure flat multiplier to ensure absolute 
-    # stability for the neural vocoder.
-    
     fixed_semitone_map = {
-        'Upper 3rd': 4.0,   # Major 3rd
-        'Lower 3rd': -4.0,  # Major 3rd down
-        '5th': 7.0,         # Perfect 5th
+        'Upper 3rd': 4.0,
+        'Lower 3rd': -4.0,
+        '5th': 7.0,
         'Octave Up': 12.0,
         'Octave Down': -12.0
     }
     shift_semitones = fixed_semitone_map.get(harmony_type, 4.0)
     
-    # Ensure unvoiced regions (0.0) stay 0.0, and pitched regions scale perfectly
-    f0_shifted = _f0 * (2.0 ** (shift_semitones / 12.0))
+    # Unvoiced regions (0.0) stay 0.0, pitched regions scale perfectly
+    f0_shifted = _f0_smooth * (2.0 ** (shift_semitones / 12.0))
 
     # Calculate metallic audio using PyWorld
     metallic_audio_24k = pw.synthesize(f0_shifted, sp, ap, TARGET_SR).astype(np.float32)
@@ -99,31 +121,14 @@ def generate_harmony(
     
     vocoder = get_vocos()
     
-    # 1. Convert to torch tensor with shape [1, length]
+    # 1. Convert to torch tensor with shape [B, C, T] -> [1, length]
     audio_tensor = torch.from_numpy(metallic_audio_24k).unsqueeze(0)
     
     # 2. Extract Mel-Spectrogram features (destroys the metallic PyWorld phase)
     with torch.no_grad():
         mel_features = vocoder.feature_extractor(audio_tensor)
         
-        # 3. Temporal Mel-Spectrogram Smoothing (Fixes Trembling)
-        # -------------------------------------------------------
-        # PyWorld's raw F0 extraction contains micro-jitter that causes
-        # the synthesized audio to "tremble." Previously we tried to fix
-        # this by smoothing F0 before synthesis, but that desynchronized
-        # F0 from SP/AP and brought back metallic tearing.
-        #
-        # Instead, we smooth the Mel-spectrogram AFTER PyWorld synthesis
-        # but BEFORE Vocos decoding. This is completely outside the
-        # PyWorld pipeline, so it cannot cause phase desynchronization.
-        # A gentle 1D Gaussian blur along the time axis smooths out
-        # frame-to-frame spectral jitter without altering pitch or formants.
-        mel_np = mel_features.squeeze(0).numpy()  # [n_mels, n_frames]
-        from scipy.ndimage import gaussian_filter1d
-        mel_smoothed = gaussian_filter1d(mel_np, sigma=1.5, axis=1)
-        mel_features = torch.from_numpy(mel_smoothed).unsqueeze(0)
-        
-        # 4. Decode features via Deep Learning into flawless acoustic waveform
+        # 3. Decode features via Deep Learning into flawless acoustic waveform
         neural_audio_tensor = vocoder.decode(mel_features)
         
     harmony_24k = neural_audio_tensor.squeeze().cpu().numpy()
