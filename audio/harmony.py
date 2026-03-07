@@ -19,29 +19,6 @@ def get_vocos() -> Vocos:
         _VOCOS_MODEL = Vocos.from_pretrained("charactr/vocos-mel-24khz")
     return _VOCOS_MODEL
 
-def fill_all_gaps(f0: np.ndarray) -> np.ndarray:
-    """
-    Interpolates over all gaps of 0.0 in the F0 array, completely bridging
-    unvoiced regions to force a continuous pitch contour.
-    """
-    f0_filled = np.copy(f0)
-    
-    # Standard numpy trick to linearly interpolate over all zeros
-    f0_filled[f0_filled == 0.0] = np.nan
-    valid_indices = ~np.isnan(f0_filled)
-    
-    if np.any(valid_indices):
-        f0_filled = np.interp(
-            np.arange(len(f0_filled)),
-            np.arange(len(f0_filled))[valid_indices],
-            f0_filled[valid_indices]
-        )
-    else:
-        # Failsafe if the entire track is unvoiced
-        f0_filled.fill(0.0)
-        
-    return f0_filled
-
 def generate_harmony(
     audio: np.ndarray,
     sr: int,
@@ -87,16 +64,13 @@ def generate_harmony(
     sp = pw.cheaptrick(audio_24k_f64, _f0, t, TARGET_SR)
     ap = pw.d4c(audio_24k_f64, _f0, t, TARGET_SR)
 
-    # Fill unvoiced gaps for continuous shifting
-    _f0_filled = fill_all_gaps(_f0) 
-
-    native_shifts = np.zeros_like(_f0_filled)
-    for i in range(len(_f0_filled)):
-        if _f0_filled[i] > 0.0:
-            native_shifts[i] = compute_harmony_shift(_f0_filled[i], root, scale_type, interval)
+    native_shifts = np.zeros_like(_f0)
+    for i in range(len(_f0)):
+        if _f0[i] > 0.0:
+            native_shifts[i] = compute_harmony_shift(_f0[i], root, scale_type, interval)
 
     smoothed_shifts = scipy.signal.medfilt(native_shifts, kernel_size=15)
-    f0_smooth = scipy.signal.medfilt(_f0_filled, kernel_size=5)
+    f0_smooth = scipy.signal.medfilt(_f0, kernel_size=5)
 
     # Calculate actual shifted pitch contour
     shift_multipliers = 2.0 ** (smoothed_shifts / 12.0)
