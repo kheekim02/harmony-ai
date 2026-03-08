@@ -5,8 +5,8 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('gui/assets', 'gui/assets')],
-    hiddenimports=['librosa', 'soundfile', 'numpy', 'pyworld', 'pkg_resources', 'setuptools', 'parselmouth'],
+    datas=[],
+    hiddenimports=['librosa', 'soundfile', 'numpy', 'pyworld', 'pkg_resources', 'setuptools'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -32,7 +32,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='gui/assets/icon.png',
 )
 coll = COLLECT(
     exe,
@@ -46,6 +45,6 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='HarmonyAI.app',
-    icon='gui/assets/icon.png',
-    bundle_identifier='com.harmonyai.vocalgen',
+    icon=None,
+    bundle_identifier=None,
 )
